@@ -1,0 +1,92 @@
+---
+- name: Deploy web application in Docker container
+  hosts: localhost
+  connection: local
+  become: yes
+
+  vars_files:
+    - vault.yml
+
+  vars:
+    download_url: "https://github.com/octocat/Hello-World/tarball/master"
+    work_dir: "/opt/webapp"
+    container_name: "nginx"
+    image_version: "1.28.0"
+    ssh_port: 43843
+    http_port: 8080
+
+  tasks:
+    - name: Update APT cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install Docker, UFW
+      apt:
+        name:
+          - docker.io
+          - ufw
+        state: present
+
+    - name: Ensure Docker service is running
+      service:
+        name: docker
+        state: started
+        enabled: yes
+
+    - name: Create application user
+      user:
+        name: "{{ vault_app_user }}"
+        password: "{{ vault_app_password | password_hash('sha512') }}"
+        shell: /usr/sbin/nologin
+        update_password: on_create
+
+    - name: Enable UFW with default deny
+      ufw:
+        state: enabled
+        policy: deny
+
+    - name: Allow SSH and HTTP ports
+      ufw:
+        rule: allow
+        port: "{{ item }}"
+      loop:
+        - "{{ ssh_port }}"
+        - "{{ http_port }}"
+
+    - name: Download application archive with checksum
+      ansible.builtin.get_url:
+        url: "{{ download_url }}"
+        dest: "/tmp/app.tar.gz"
+        checksum: "sha256:9f40b519431e9754a1680244b820877ca975aa969ea4ae72798bfe3f67d0f139"
+
+    - name: Ensure work_dir exists with secure permissions
+      file:
+        path: "{{ work_dir }}"
+        state: directory
+        owner: "{{ vault_app_user }}"
+        group: "{{ vault_app_user }}"
+        mode: '0755'
+
+    - name: Extract application archive
+      unarchive:
+        src: "/tmp/app.tar.gz"
+        dest: "{{ work_dir }}"
+        remote_src: yes
+
+    - name: Run Nginx container
+      community.docker.docker_container:
+        name: "{{ container_name }}"
+        image: "nginx:{{ image_version }}"
+        state: started
+        restart_policy: always
+        published_ports:
+          - "{{ http_port }}:80"
+        volumes:
+          - "{{ work_dir }}:/usr/share/nginx/html:ro"
+
+    - name: Grant limited sudo rights to app user
+      copy:
+        dest: "/etc/sudoers.d/{{ vault_app_user }}"
+        content: "{{ vault_app_user }} ALL=(ALL) /usr/bin/systemctl,/usr/bin/journalctl"
+        mode: '0440'
